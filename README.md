@@ -32,6 +32,13 @@ const BookEngine = require('./BookEngine.umd.js');
 
 ```
 
+#### CDNの利用
+
+```html
+<script src="https://cdn.jsdelivr.net/gh/ttokioka/book-js@v1/BookEngine.umd.js"></script>
+
+```
+
 ---
 
 ## 基本的な使い方
