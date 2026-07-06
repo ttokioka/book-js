@@ -23,7 +23,13 @@ class FormulaLexer {
       if (/\s/.test(char)) { i++; continue; }
 
       // 2. 演算子・区切り文字
-      if (['&', '+', '-', '*', '/', '(', ')', ',', '{', '}', ';'].includes(char)) {
+      const twoCharOp = src.substr(i, 2);
+      if (['<>', '<=', '>='].includes(twoCharOp)) {
+        tokens.push({ type: 'Operator', value: twoCharOp });
+        i += 2;
+        continue;
+      }
+      if (['&', '+', '-', '*', '/', '(', ')', ',', '{', '}', ';', '=', '<', '>'].includes(char)) {
         tokens.push({ type: 'Operator', value: char });
         i++;
         continue;
@@ -64,33 +70,32 @@ class FormulaLexer {
         continue;
       }
 
-      // 5. セル参照、関数名、あるいはシート名付き参照
-      // アルファベット、数値、コロン(: 範囲用)、感嘆符(! シート用) を受け入れる
+      // 5. セル参照、関数名、あるいはシート名付き参照 / TRUE, FALSE
       if (char === "'" || /[A-Za-z_]/.test(char)) {
         let identStr = '';
         
         if (char === "'") {
-          // クォート閉じのあとの '!' やセル名までを貪欲に読み込む
-          // 例: 'シート1'!A1:B2 
           let inQuote = true;
           identStr += src[i]; // "'"
           i++;
           while (i < src.length && inQuote) {
             identStr += src[i];
-            if (src[i] === "'") inQuote = false; // クォートが閉じたらフラグを落とす
+            if (src[i] === "'") inQuote = false;
             i++;
           }
         }
         
-        // 残りの部分（!A1 や :B2 など）を既存のルール通りに読み込む
         while (i < src.length && /[A-Za-z0-9_!:]/.test(src[i])) {
           identStr += src[i];
           i++;
         }
         
-        // あとは既存と同じ（関数か参照かの判定）
         if (src[i] === '(') {
           tokens.push({ type: 'FunctionName', value: identStr.toUpperCase() });
+        } else if (identStr.toUpperCase() === 'TRUE') {
+          tokens.push({ type: 'Boolean', value: true });
+        } else if (identStr.toUpperCase() === 'FALSE') {
+          tokens.push({ type: 'Boolean', value: false });
         } else {
           tokens.push({ type: 'Reference', value: identStr });
         }
@@ -181,6 +186,11 @@ class FormulaParser {
         return { type: 'Literal', value: token.value };
       }
 
+      if (token.type === 'Boolean') {
+        consume('Boolean');
+        return { type: 'Literal', value: token.value };
+      }
+
       if (token.type === 'Reference') {
         consume('Reference');
         return { type: 'Reference', raw: token.value };
@@ -223,7 +233,12 @@ class FormulaParser {
     }
 
     // 演算子の優先順位の定義
-    const PRECEDENCE = { '&': 1, '+': 2, '-': 2, '*': 3, '/': 3 };
+    const PRECEDENCE = { 
+      '=': 1, '<>': 1, '<': 1, '<=': 1, '>': 1, '>=': 1,
+      '&': 2, 
+      '+': 3, '-': 3, 
+      '*': 4, '/': 4 
+    };
 
     function parseBinaryExpression(parentPrecedence) {
       let left = parsePrimary();
@@ -428,6 +443,12 @@ class BookEngine {
             case '/': 
               if (Number(rightVal) === 0) throw new Error("0での除算が発生しました");
               return Number(leftVal) / Number(rightVal);
+            case '=': return leftVal == rightVal;
+            case '<>': return leftVal != rightVal;
+            case '<': return leftVal < rightVal;
+            case '<=': return leftVal <= rightVal;
+            case '>': return leftVal > rightVal;
+            case '>=': return leftVal >= rightVal;
             default:
               throw new Error(`未対応の演算子です: ${node.operator}`);
           }
