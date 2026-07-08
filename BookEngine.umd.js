@@ -278,6 +278,80 @@ class FormulaAST {
   }
 }
 
+class BookReference {
+  constructor(options) {
+    // options: { type: 'cell'|'range', sheetNo, start, end }
+    this.type = options.type;
+    this.sheetNo = options.sheetNo;
+    this.start = options.start; // { rowNo, columnNo }
+    this.end = options.end || options.start; // range の場合の終点
+  }
+
+  /**
+   * 現在の参照に対応する値を計算結果(values)から取得します。
+   * Pending状態が含まれる場合は Symbol('pending') を返します。
+   */
+  getValue(values, PendingSymbol) {
+    const sheet = values[this.sheetNo];
+
+    if (this.type === 'cell') {
+      if (!sheet || !sheet[this.start.rowNo]) return 0;
+      const val = sheet[this.start.rowNo][this.start.columnNo];
+      if (val === PendingSymbol) return PendingSymbol;
+      return val === undefined ? 0 : val;
+    }
+
+    if (this.type === 'range') {
+      const startRow = Math.min(this.start.rowNo, this.end.rowNo);
+      const endRow = Math.max(this.start.rowNo, this.end.rowNo);
+      const startCol = Math.min(this.start.columnNo, this.end.columnNo);
+      const endCol = Math.max(this.start.columnNo, this.end.columnNo);
+
+      const rangeValues = [];
+      for (let r = startRow; r <= endRow; r++) {
+        const rowValues = [];
+        for (let c = startCol; c <= endCol; c++) {
+          const val = (sheet && sheet[r]) ? sheet[r][c] : undefined;
+          if (val === PendingSymbol) return PendingSymbol;
+          rowValues.push(val === undefined ? 0 : val);
+        }
+        rangeValues.push(rowValues);
+      }
+      return rangeValues;
+    }
+
+    return 0;
+  }
+
+  /**
+   * OFFSET等で参照を移動・サイズ変更した新しい BookReference を作成します。
+   */
+  offset(rowOffset, colOffset, height, width) {
+    const newStartRow = this.start.rowNo + rowOffset;
+    const newStartCol = this.start.columnNo + colOffset;
+
+    const targetHeight = (height !== undefined && height !== null) 
+      ? height 
+      : (Math.abs(this.end.rowNo - this.start.rowNo) + 1);
+
+    const targetWidth = (width !== undefined && width !== null) 
+      ? width 
+      : (Math.abs(this.end.columnNo - this.start.columnNo) + 1);
+
+    const newEndRow = newStartRow + targetHeight - 1;
+    const newEndCol = newStartCol + targetWidth - 1;
+
+    const isRange = targetHeight > 1 || targetWidth > 1;
+
+    return new BookReference({
+      type: isRange ? 'range' : 'cell',
+      sheetNo: this.sheetNo,
+      start: { rowNo: newStartRow, columnNo: newStartCol },
+      end: { rowNo: newEndRow, columnNo: newEndCol }
+    });
+  }
+}
+
 class BookEngine {
   static Pending = Symbol('pending');
   static createFormula(formula) {
@@ -285,7 +359,14 @@ class BookEngine {
     return new FormulaAST(FormulaParser.parse(tokens));
   }
   constructor(...funcs) {
-    this.definedFunctions = Object.assign({}, ...funcs);
+    this.definedFunctions = {};
+    if (funcs.length > 0) {
+      for (const funcMap of funcs) {
+        for (const [name, fn] of Object.entries(funcMap)) {
+          this.defineFunction(name, fn);
+        }
+      }
+    }
   }
   async requestCalc(book) {
     let formulaQueue = [];
@@ -341,18 +422,33 @@ class BookEngine {
     return values;
   }
   calc(ctx, values, sheets) {
-    // セル参照文字列（例: "A1", "Sheet1!B2"）を行列インデックスに変換するヘルパー
+    const Pending = this.constructor.Pending;
+
+    // 単一セル文字 ("A1") を { rowNo, columnNo } に変換するヘルパー
+    const parseSingleCell = (str) => {
+      const match = str.match(/^([A-Za-z]+)([0-9]+)$/);
+      if (!match) throw new Error(`不正なセル参照です: ${str}`);
+      
+      const colStr = match[1].toUpperCase();
+      let columnNo = 0;
+      for (let i = 0; i < colStr.length; i++) {
+        columnNo = columnNo * 26 + (colStr.charCodeAt(i) - 64);
+      }
+      columnNo--;
+      const rowNo = parseInt(match[2], 10) - 1;
+      return { rowNo, columnNo };
+    };
+
+    // セル参照文字列から BookReference インスタンスを生成
     const parseReference = (refStr) => {
       let sheetNo = ctx.sheetNo;
       let cellStr = refStr;
 
       if (refStr.includes('!')) {
-        // 最後の '!' で分割するか、通常のsplit
         const parts = refStr.split('!');
         let sheetName = parts[0];
         cellStr = parts[1];
 
-        // 最初と最後がシングルクォーテーションなら取り除く
         if (sheetName.startsWith("'") && sheetName.endsWith("'")) {
           sheetName = sheetName.slice(1, -1);
         }
@@ -361,34 +457,32 @@ class BookEngine {
         if (sheetNo === undefined) throw new Error(`存在しないシート名です: ${sheetName}`);
       }
 
-      // --- 範囲指定 (例: A1:B2) のパースを追加 ---
       if (cellStr.includes(':')) {
         const [startRef, endRef] = cellStr.split(':');
-        // 単一セルパース処理（下記）を再利用するためにヘルパー化するか、個別にパース
-        const start = parseSingleCell(startRef);
-        const end = parseSingleCell(endRef);
-        return { type: 'range', sheetNo, start, end };
+        return new BookReference({
+          type: 'range',
+          sheetNo,
+          start: parseSingleCell(startRef),
+          end: parseSingleCell(endRef)
+        });
       }
 
-      return { type: 'cell', ...parseSingleCell(cellStr), sheetNo };
-
-      // 単一セルをパースするインナー関数
-      function parseSingleCell(str) {
-        const match = str.match(/^([A-Za-z]+)([0-9]+)$/);
-        if (!match) throw new Error(`不正なセル参照です: ${str}`);
-        
-        const colStr = match[1].toUpperCase();
-        let columnNo = 0;
-        for (let i = 0; i < colStr.length; i++) {
-          columnNo = columnNo * 26 + (colStr.charCodeAt(i) - 64);
-        }
-        columnNo--;
-        const rowNo = parseInt(match[2], 10) - 1;
-        return { rowNo, columnNo };
-      }
+      return new BookReference({
+        type: 'cell',
+        sheetNo,
+        start: parseSingleCell(cellStr)
+      });
     };
 
-    // 再帰的にASTノードを評価する関数
+    // BookReference または 生の値を、値(または二次元配列)へと解決するヘルパー
+    const resolveValue = (val) => {
+      if (val instanceof BookReference) {
+        return val.getValue(values, Pending);
+      }
+      return val;
+    };
+
+    // ASTノード評価
     const evaluate = (node) => {
       if (!node) return 0;
 
@@ -396,44 +490,30 @@ class BookEngine {
         case 'Literal':
           return node.value;
 
-        // 配列リテラルノードの評価処理
         case 'ArrayLiteral': {
           const evaluatedMatrix = [];
           for (const row of node.matrix) {
             const evaluatedRow = [];
             for (const cellNode of row) {
-              const val = evaluate(cellNode);
-              if (val === this.constructor.Pending) return this.constructor.Pending;
+              const val = resolveValue(evaluate(cellNode));
+              if (val === Pending) return Pending;
               evaluatedRow.push(val);
             }
             evaluatedMatrix.push(evaluatedRow);
           }
-          return evaluatedMatrix; // JSの二次元配列を返す
+          return evaluatedMatrix;
         }
 
         case 'Reference': {
-          const ref = parseReference(node.raw);
-          if (ref.type === 'cell') {
-            const targetSheet = values[ref.sheetNo];
-            if (!targetSheet || !targetSheet[ref.rowNo]) return 0; // 範囲外は0扱い
-            
-            const targetValue = targetSheet[ref.rowNo][ref.columnNo];
-            
-            // 参照先がまだ未計算(Pending)の場合は、このセルも解決を保留する
-            if (targetValue === this.constructor.Pending) {
-              return this.constructor.Pending;
-            }
-            return targetValue === undefined ? 0 : targetValue;
-          }
-          return 0;
+          return parseReference(node.raw);
         }
 
         case 'BinaryExpression': {
-          const leftVal = evaluate(node.left);
-          if (leftVal === this.constructor.Pending) return this.constructor.Pending;
+          let leftVal = resolveValue(evaluate(node.left));
+          if (leftVal === Pending) return Pending;
 
-          const rightVal = evaluate(node.right);
-          if (rightVal === this.constructor.Pending) return this.constructor.Pending;
+          let rightVal = resolveValue(evaluate(node.right));
+          if (rightVal === Pending) return Pending;
 
           switch (node.operator) {
             case '&': return `${leftVal}${rightVal}`;
@@ -455,68 +535,41 @@ class BookEngine {
         }
 
         case 'CallExpression': {
-          const func = this.definedFunctions[node.callee];
-          if (!func) {
+          const funcObj = this.definedFunctions[node.callee];
+          if (!funcObj) {
             throw new Error(`未定義の関数です: ${node.callee}`);
           }
 
-          const args = [];
           const context = {
-            arguments: [],
             caller: ctx,
-            sheets: sheets
+            sheets: sheets,
+            evaluate: (targetNode) => resolveValue(evaluate(targetNode))
           };
-          for (const argNode of node.arguments) {
-            // 引数が「参照（Rangeの可能性あり）」の場合の特別処理
-            const refArg = argNode.type === 'Reference';
-            if (refArg) {
-              const ref = parseReference(argNode.raw);
-              context.arguments.push(ref);
-              
-              if (ref.type === 'range') {
-                const startRow = Math.min(ref.start.rowNo, ref.end.rowNo);
-                const endRow = Math.max(ref.start.rowNo, ref.end.rowNo);
-                const startCol = Math.min(ref.start.columnNo, ref.end.columnNo);
-                const endCol = Math.max(ref.start.columnNo, ref.end.columnNo);
-                
-                let rangePending = false;
-                const rangeValues = []; // ここに二次元配列（[行][列]）を構築する
 
-                for (let r = startRow; r <= endRow; r++) {
-                  const rowValues = []; // 各行のデータを格納する配列
-                  
-                  for (let c = startCol; c <= endCol; c++) {
-                    const targetSheet = values[ref.sheetNo];
-                    // シートや行が存在しない場合は undefined とみなす
-                    const targetValue = (targetSheet && targetSheet[r]) ? targetSheet[r][c] : undefined;
+          if (funcObj.isLazy) {
+            // 遅延評価モード: ASTノードを直接渡し、関数内で必要になったタイミングで context.evaluate を呼ぶ
+            return funcObj.fn.apply({ Pending, context }, node.arguments);
+          } else {
+            // 通常の評価モード: 先に引数をすべて評価してから関数に渡す
+            const evaluatedArgs = [];
+            context.arguments = [];
+            for (const argNode of node.arguments) {
+              const rawArg = evaluate(argNode);
 
-                    if (targetValue === this.constructor.Pending) {
-                      rangePending = true;
-                      break;
-                    }
-                    rowValues.push(targetValue);
-                  }
-                  
-                  if (rangePending) break;
-                  rangeValues.push(rowValues); // 行の配列を二次元配列に追加
-                }
+              if (rawArg === Pending) return Pending;
 
-                if (rangePending) return this.constructor.Pending;
-                
-                // 二次元配列（例: [[1, 2], [3, 4]]）のまま引数として追加
-                args.push(rangeValues); 
-                continue;
+              if (rawArg instanceof BookReference) {
+                context.arguments.push(rawArg);
+                const resolved = rawArg.getValue(values, Pending);
+                if (resolved === Pending) return Pending;
+                evaluatedArgs.push(resolved);
+              } else {
+                context.arguments.push({ type: 'value', value: rawArg });
+                evaluatedArgs.push(rawArg);
               }
             }
-
-            // 通常のノード（LiteralやBinaryExpression、単一セル参照）の評価
-            const argVal = evaluate(argNode);
-            if (argVal === this.constructor.Pending) return this.constructor.Pending;
-            if (!refArg) context.arguments.push({ type: 'value', value: argVal });
-            args.push(argVal);
+            return funcObj.fn.apply({ Pending, context }, evaluatedArgs);
           }
-
-          return func.apply({ context }, args);
         }
 
         default:
@@ -524,10 +577,17 @@ class BookEngine {
       }
     };
 
-    return evaluate(ctx.formula);
+    const result = evaluate(ctx.formula);
+    return resolveValue(result);
   }
+
   defineFunction(name, func) {
-    this.definedFunctions[name.toUpperCase()] = func;
+    const isLazy = name.startsWith('!');
+    const cleanName = isLazy ? name.slice(1).toUpperCase() : name.toUpperCase();
+    this.definedFunctions[cleanName] = {
+      fn: func,
+      isLazy: isLazy
+    };
   }
 }
 return BookEngine;

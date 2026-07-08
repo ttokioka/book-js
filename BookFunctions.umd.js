@@ -538,6 +538,22 @@ const BookFunctions = {
       return start.columnNo + 1;
     }
     return this.context.caller.columnNo + 1;
+  },
+  
+  // 論理
+  // 論理式が TRUE の場合はある値を返し、FALSE の場合は別の値を返します。
+  "!IF"(condNode, trueNode, falseNode) {
+    const condition = this.context.evaluate(condNode);
+
+    if (condition === this.Pending) {
+      return this.Pending; // 依存セルがPendingの場合
+    }
+
+    if (condition) {
+      return this.context.evaluate(trueNode);
+    } else {
+      return falseNode ? this.context.evaluate(falseNode) : 0;
+    }
   }
 };
 
