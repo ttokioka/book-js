@@ -387,6 +387,28 @@ class BookEngine {
         })
       );
     });
+    const setValue = (ctx, value) => {
+      const { sheetNo, rowNo, columnNo } = ctx;
+      if (!Array.isArray(value)) {
+        values[sheetNo][rowNo][columnNo] = value;
+        return;
+      }
+      let rowIdx = rowNo;
+      for (const row of value) {
+        let colIdx = columnNo;
+        for (const item of row) {
+          values[sheetNo][rowIdx][colIdx] = item;
+          colIdx++;
+          if (colIdx >= values[sheetNo][rowIdx].length) {
+            break;
+          }
+        }
+        rowIdx++;
+        if (rowIdx >= values[sheetNo].length) {
+          break;
+        }
+      }
+    };
     while (formulaQueue.length > 0) {
       const nextQueue = [];
       const promiseList = [];
@@ -398,8 +420,7 @@ class BookEngine {
               nextQueue.push(ctx);
               return;
             }
-            const { sheetNo, rowNo, columnNo } = ctx;
-            values[sheetNo][rowNo][columnNo] = result;
+            setValue(ctx, result);
           }));
           continue;
         }
@@ -407,8 +428,7 @@ class BookEngine {
           nextQueue.push(ctx);
           continue;
         }
-        const { sheetNo, rowNo, columnNo } = ctx;
-        values[sheetNo][rowNo][columnNo] = value;
+        setValue(ctx, value);
       }
       await Promise.all(promiseList);
       if (nextQueue.length === formulaQueue.length) {
